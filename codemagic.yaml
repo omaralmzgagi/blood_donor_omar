@@ -1,0 +1,115 @@
+workflows:
+  android-apk:
+    name: Blood Donor Ibb - Android APK
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      java: 17
+    scripts:
+      - name: Generate Android platform
+        script: |
+          flutter create --platforms=android .
+      - name: Create temporary release signing key
+        script: |
+          set -e
+          keytool -genkeypair -v \
+            -keystore "$CM_BUILD_DIR/android/release-keystore.jks" \
+            -storepass "BloodDonorIbb2026!" \
+            -keypass "BloodDonorIbb2026!" \
+            -alias "blood_donor_ibb" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Blood Donor Ibb, OU=Mobile, O=Blood Donor Ibb, L=Ibb, ST=Ibb, C=YE"
+          cat > "$CM_BUILD_DIR/android/key.properties" <<'EOF'
+          storePassword=BloodDonorIbb2026!
+          keyPassword=BloodDonorIbb2026!
+          keyAlias=blood_donor_ibb
+          storeFile=release-keystore.jks
+          EOF
+      - name: Configure release signing
+        script: |
+          set -e
+          cd "$CM_BUILD_DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/build.gradle.kts")
+          if p.exists():
+              s = p.read_text()
+              if "release-keystore.jks" not in s:
+                  prefix = '''import java.util.Properties
+          import java.io.FileInputStream
+
+          val keystoreProperties = Properties()
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+          }
+
+          '''
+                  s = prefix + s
+                  marker = "    buildTypes {"
+                  signing = '''    signingConfigs {
+                  create("release") {
+                      keyAlias = keystoreProperties["keyAlias"] as String
+                      keyPassword = keystoreProperties["keyPassword"] as String
+                      storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                      storePassword = keystoreProperties["storePassword"] as String
+                  }
+              }
+          '''
+                  s = s.replace(marker, signing + marker, 1)
+                  if 'signingConfig = signingConfigs.getByName("release")' not in s:
+                      s = s.replace(
+                          'release {',
+                          'release {\n            signingConfig = signingConfigs.getByName("release")',
+                          1
+                      )
+                  p.write_text(s)
+          else:
+              p = Path("android/app/build.gradle")
+              s = p.read_text()
+              if "release-keystore.jks" not in s:
+                  prefix = '''import java.util.Properties
+          import java.io.FileInputStream
+
+          def keystoreProperties = new Properties()
+          def keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          }
+
+          '''
+                  s = prefix + s
+                  marker = "    buildTypes {"
+                  signing = '''    signingConfigs {
+                  release {
+                      keyAlias keystoreProperties['keyAlias']
+                      keyPassword keystoreProperties['keyPassword']
+                      storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+                      storePassword keystoreProperties['storePassword']
+                  }
+              }
+          '''
+                  s = s.replace(marker, signing + marker, 1)
+                  s = s.replace(
+                      'signingConfig signingConfigs.debug',
+                      'signingConfig signingConfigs.release'
+                  )
+                  p.write_text(s)
+          PY
+      - name: Build signed release APK
+        script: |
+          flutter pub get
+          flutter clean
+          flutter build apk --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+    publishing:
+      email:
+        recipients:
+          - $CM_BUILD_TRIGGERING_COMMIT_AUTHOR_EMAIL
+        notify:
+          success: true
+          failure: true
